@@ -48,6 +48,11 @@ pub struct Participant {
     running: Arc<AtomicBool>,
     send_success_prob: f64,
     operation_success_prob: f64,
+    send: Sender<ProtocolMessage>,
+    recv: Receiver<ProtocolMessage>,
+    success_operations: u64,
+    failed_operations: u64,
+    count: u32
 }
 
 ///
@@ -75,17 +80,24 @@ impl Participant {
     pub fn new(
         id_str: String,
         log_path: String,
-        r: Arc<AtomicBool>,
+        r: &Arc<AtomicBool>,
         send_success_prob: f64,
-        operation_success_prob: f64) -> Participant {
+        operation_success_prob: f64,
+        trans: Sender<ProtocolMessage>,
+        recv: Receiver<ProtocolMessage>) -> Participant {
 
         Participant {
             id_str: id_str,
             state: ParticipantState::Quiescent,
             log: oplog::OpLog::new(log_path),
-            running: r,
+            running: r.clone(),
             send_success_prob: send_success_prob,
             operation_success_prob: operation_success_prob,
+            send: trans,
+            recv: recv,
+            success_operations: 0,
+            failed_operations: 0,
+            count: 0
             // TODO
         }
     }
@@ -101,8 +113,17 @@ impl Participant {
     pub fn send(&mut self, pm: ProtocolMessage) {
         let x: f64 = random();
         if x <= self.send_success_prob {
-            // TODO: Send success
+
+            info!("{}::Sending success operation #{}", pm.txid.clone(), pm.opid.clone());
+
+            // Here we go send the protocol message from a client
+            let _ = self.send.send(pm);
+
+            trace!("{}::Sent success operation #{}", pm.txid.clone(), pm.opid.clone());
+
         } else {
+            // Do nothing if it fails?
+            debug!("Message failed to send!")
             // TODO: Send fail
         }
     }
@@ -119,15 +140,19 @@ impl Participant {
     ///       (it's ok to add parameters or return something other than
     ///       bool if it's more convenient for your design).
     ///
-    pub fn perform_operation(&mut self, request_option: &Option<ProtocolMessage>) -> bool {
+    pub fn perform_operation(&mut self, request_option: ProtocolMessage) -> bool {
 
         trace!("{}::Performing operation", self.id_str.clone());
         let x: f64 = random();
-        if x <= self.operation_success_prob {
-            // TODO: Successful operation
-        } else {
-            // TODO: Failed operation
+        let message_type = MessageType::ParticipantVoteCommit;
+
+        if x > self.operation_success_prob {
+            message_type = MessageType::ParticipantVoteAbort;
         }
+
+        let txid = format!("{}_op_{}", self.id_str.clone(), self.count);
+        let return_message = ProtocolMessage::generate(message_type, txid, self.id_str.clone(), self.count);
+        self.send(return_message);
 
         true
     }
@@ -139,8 +164,8 @@ impl Participant {
     ///
     pub fn report_status(&mut self) {
         // TODO: Collect actual stats
-        let successful_ops: u64 = 0;
-        let failed_ops: u64 = 0;
+        let successful_ops: u64 = self.success_operations;
+        let failed_ops: u64 = self.failed_operations;
         let unknown_ops: u64 = 0;
 
         println!("{:16}:\tCommitted: {:6}\tAborted: {:6}\tUnknown: {:6}", self.id_str.clone(), successful_ops, failed_ops, unknown_ops);
@@ -154,8 +179,25 @@ impl Participant {
         trace!("{}::Waiting for exit signal", self.id_str.clone());
 
         // TODO
+        while self.running.load(Ordering::SeqCst) {
+            thread::sleep(Duration::from_millis(1));
+        }
 
         trace!("{}::Exiting", self.id_str.clone());
+    }
+
+    fn wait_for_coordinator_decision(&mut self) -> bool{
+        let coord_final_message = self.recv.recv().unwrap();
+        if coord_final_message.mtype == MessageType::CoordinatorCommit{
+            self.success_operations += 1;
+        } else if coord_final_message.mtype == MessageType::CoordinatorAbort {
+            self.failed_operations += 1;
+        } else if coord_final_message.mtype == MessageType::CoordinatorExit {
+            return true;
+        } else {
+            debug!("Did not recieve expected message from Coordinator");
+        }
+        return false;
     }
 
     ///
@@ -168,8 +210,28 @@ impl Participant {
         trace!("{}::Beginning protocol", self.id_str.clone());
 
         // TODO
+        let done = false;
+
+        while !done{
+            // Receive message to start processing message CoordinatorPropose recieve
+            //Receive message from coordinator to execute
+            let coord_propose_message = self.recv.recv().unwrap();
+            if coord_propose_message.mtype == MessageType::CoordinatorExit {
+                done = true;
+                continue;
+            }
+
+            // Process Message
+            // Send message back confirming if the message was good ParticipantVoteCommit/ParticipantVoteAbort
+            let result = self.perform_operation(coord_propose_message);
+
+            // Wait for Message from Coordinator, telling if should commit or not CoordinatorAbort/CoordinatorCommit
+            done = self.wait_for_coordinator_decision();
+        }
 
         self.wait_for_exit_signal();
         self.report_status();
     }
+
+
 }

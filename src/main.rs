@@ -9,6 +9,9 @@ use std::fs;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::process::{Child,Command};
+use client::Client;
+use coordinator::ChildData;
+use coordinator::Coordinator;
 use ipc_channel::ipc::IpcSender as Sender;
 use ipc_channel::ipc::IpcReceiver as Receiver;
 use ipc_channel::ipc::IpcOneShotServer;
@@ -21,6 +24,7 @@ pub mod client;
 pub mod checker;
 pub mod tpcoptions;
 use message::ProtocolMessage;
+use participant::Participant;
 
 ///
 /// pub fn spawn_child_and_connect(child_opts: &mut tpcoptions::TPCOptions) -> (std::process::Child, Sender<ProtocolMessage>, Receiver<ProtocolMessage>)
@@ -34,16 +38,28 @@ use message::ProtocolMessage;
 ///
 /// HINT: You can change the signature of the function if necessary
 ///
-fn spawn_child_and_connect(child_opts: &mut tpcoptions::TPCOptions) -> (Child, Sender<ProtocolMessage>, Receiver<ProtocolMessage>) {
+fn spawn_child_and_connect(child_opts: &mut tpcoptions::TPCOptions, tx: Sender<ProtocolMessage>) -> (Child, Sender<ProtocolMessage>, Receiver<ProtocolMessage>) {
+    // This function must be used in conjunction with connect_to_coordinator, you're given the options of the child node which
+    // includes the ipc name for which you need to connect to. This function is being called by the coordinator
+
+    let (server, name) : (IpcOneShotServer<(Sender<ProtocolMessage>, String)>, String) = IpcOneShotServer::new().unwrap();
+
+    child_opts.ipc_path = name; //Server name
+
     let child = Command::new(env::current_exe().unwrap())
         .args(child_opts.as_vec())
         .spawn()
         .expect("Failed to execute child process");
 
-    let (tx, rx) = channel().unwrap();
-    // TODO
 
-    (child, tx, rx)
+    let (_, (send_message_to_child, child_server_name)) : (_, (Sender<ProtocolMessage>, String)) = server.accept().unwrap();
+
+    // I now have the child_transmitter_channel to communicate with the child and send him stuff
+    // I want to recieve stuff now
+    let child_transmitter: Sender<Sender<ProtocolMessage>> = Sender::connect(child_server_name.to_string()).unwrap(); // Connecting to server
+    child_transmitter.send(tx).unwrap();
+
+    (child, send_message_to_child, rx)
 }
 
 ///
@@ -60,9 +76,18 @@ fn spawn_child_and_connect(child_opts: &mut tpcoptions::TPCOptions) -> (Child, S
 fn connect_to_coordinator(opts: &tpcoptions::TPCOptions) -> (Sender<ProtocolMessage>, Receiver<ProtocolMessage>) {
     let (tx, rx) = channel().unwrap();
 
-    // TODO
+    //Connect to the server, and you should get Sender type
+    let parent_transmitter: Sender<(Sender<ProtocolMessage>, String)> = Sender::connect(opts.ipc_path.to_string()).unwrap(); // Connecting to server
 
-    (tx, rx)
+    //Setup Oneshot Server to pass own transmitter back to parent
+    let (server, server_name) : (IpcOneShotServer<Sender<ProtocolMessage>>, String) = IpcOneShotServer::new().unwrap();
+
+    parent_transmitter.send((tx, server_name)).unwrap(); // Sending this processes own transmitter through
+
+    //Recieve transmitter from parent
+    let (_, send_message_to_parent) = server.accept().unwrap();
+
+    (send_message_to_parent, rx)
 }
 
 ///
@@ -80,8 +105,39 @@ fn connect_to_coordinator(opts: &tpcoptions::TPCOptions) -> (Sender<ProtocolMess
 /// 5. Wait until the children finish execution
 ///
 fn run(opts: & tpcoptions::TPCOptions, running: Arc<AtomicBool>) {
+    // 1. Creates a new coordinator
     let coord_log_path = format!("{}//{}", opts.log_path, "coordinator.log");
 
+    //Parents communication channels
+    let (tx, rx) = channel().unwrap();
+
+    let mut coordinator = Coordinator::new(coord_log_path, &running, rx, opts.num_requests);
+
+    // 2. Spawns and connects to new clients processes and then registers them with
+    //    the coordinator
+    for n in 0..opts.num_clients{
+        // The name of the client can be its server name
+        let mut options = opts.clone();
+        options.num = n;
+        let (ch, trans, recv) = spawn_child_and_connect( &mut options, tx.clone());
+        coordinator.client_join(ChildData{child:ch, send_to_child:trans, receive_from_child:recv});
+    }
+
+    // 3. Spawns and connects to new participant processes and then registers them
+    //    with the coordinator
+    for n in 0..opts.num_participants{
+        // The name of the client can be its server name
+        let mut options = opts.clone();
+        options.num = n;
+        let (ch, trans, recv) = spawn_child_and_connect( &mut options, tx.clone());
+        coordinator.participant_join(ChildData{child:ch, send_to_child:trans, receive_from_child:recv});
+    }
+
+
+    // 4. Starts the coordinator protocol
+    coordinator.protocol();
+
+    // 5. Wait until the children finish execution
     // TODO
 }
 
@@ -96,7 +152,13 @@ fn run(opts: & tpcoptions::TPCOptions, running: Arc<AtomicBool>) {
 /// 3. Starts the client protocol
 ///
 fn run_client(opts: & tpcoptions::TPCOptions, running: Arc<AtomicBool>) {
-    // TODO
+    // 1. Connects to the coordinator to get tx/rx
+    let (trans, recv) = connect_to_coordinator(opts);
+    // 2. Constructs a new client
+    let client_id_str = format!("client_{}", opts.num);
+    let mut client = Client::new(client_id_str, &running, trans, recv);
+    // 3. Starts the client protocol
+    client.protocol(opts.num_requests);
 }
 
 ///
@@ -112,8 +174,9 @@ fn run_client(opts: & tpcoptions::TPCOptions, running: Arc<AtomicBool>) {
 fn run_participant(opts: & tpcoptions::TPCOptions, running: Arc<AtomicBool>) {
     let participant_id_str = format!("participant_{}", opts.num);
     let participant_log_path = format!("{}//{}.log", opts.log_path, participant_id_str);
-
-    // TODO
+    let (trans, recv) = connect_to_coordinator(opts);
+    let mut participant = Participant::new(participant_id_str, participant_log_path,&running, opts.send_success_probability, opts.operation_success_probability,trans, recv);
+    participant.protocol();
 }
 
 fn main() {

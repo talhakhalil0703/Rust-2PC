@@ -20,12 +20,18 @@ use message;
 use message::MessageType;
 use message::RequestStatus;
 
+use crate::message::ProtocolMessage;
+
 // Client state and primitives for communicating with the coordinator
 #[derive(Debug)]
 pub struct Client {
     pub id_str: String,
     pub running: Arc<AtomicBool>,
     pub num_requests: u32,
+    pub send: Sender<ProtocolMessage>,
+    pub recv: Receiver<ProtocolMessage>,
+    succcess_operations: u64,
+    failed_operations: u64
 }
 
 ///
@@ -50,11 +56,15 @@ impl Client {
     ///       the protocol is still running to this constructor
     ///
     pub fn new(id_str: String,
-               running: Arc<AtomicBool>) -> Client {
+               running: &Arc<AtomicBool>, transmit: Sender<ProtocolMessage>, receiver: Receiver<ProtocolMessage>) -> Client {
         Client {
             id_str: id_str,
-            running: running,
+            running: running.clone(),
             num_requests: 0,
+            send : transmit,
+            recv: receiver,
+            succcess_operations: 0,
+            failed_operations: 0
             // TODO
         }
     }
@@ -67,6 +77,9 @@ impl Client {
         trace!("{}::Waiting for exit signal", self.id_str.clone());
 
         // TODO
+        while self.running.load(Ordering::SeqCst) {
+            thread::sleep(Duration::from_millis(1));
+        }
 
         trace!("{}::Exiting", self.id_str.clone());
     }
@@ -86,7 +99,8 @@ impl Client {
                                                     self.num_requests);
         info!("{}::Sending operation #{}", self.id_str.clone(), self.num_requests);
 
-        // TODO
+        // Here we go send the protocol message from a client
+        let _ = self.send.send(pm);
 
         trace!("{}::Sent operation #{}", self.id_str.clone(), self.num_requests);
     }
@@ -97,11 +111,22 @@ impl Client {
     /// last issued request. Note that we assume the coordinator does
     /// not fail in this simulation
     ///
-    pub fn recv_result(&mut self) {
-
-        info!("{}::Receiving Coordinator Result", self.id_str.clone());
+    pub fn recv_result(&mut self) -> bool{
 
         // TODO
+        info!("{}::Receiving Coordinator Result", self.id_str.clone());
+        let message = self.recv.recv().unwrap();
+        if message.mtype == MessageType::ClientResultCommit {
+            self.succcess_operations += 1;
+        } else if message.mtype == MessageType::ClientResultAbort {
+            self.failed_operations += 1;
+        } else if message.mtype == MessageType::CoordinatorExit {
+            return true
+        } else {
+            debug!("Message not expected from coordinator")
+        }
+
+        false
     }
 
     ///
@@ -111,8 +136,8 @@ impl Client {
     ///
     pub fn report_status(&mut self) {
         // TODO: Collect actual stats
-        let successful_ops: u64 = 0;
-        let failed_ops: u64 = 0;
+        let successful_ops: u64 = self.succcess_operations;
+        let failed_ops: u64 = self.failed_operations;
         let unknown_ops: u64 = 0;
 
         println!("{:16}:\tCommitted: {:6}\tAborted: {:6}\tUnknown: {:6}", self.id_str.clone(), successful_ops, failed_ops, unknown_ops);
@@ -128,6 +153,17 @@ impl Client {
     pub fn protocol(&mut self, n_requests: u32) {
 
         // TODO
+        for request_number in 0..n_requests {
+            // Client send request to Coordinator
+            self.send_next_operation();
+
+            //Wait for Client Result from Coordinator
+            let done = self.recv_result();
+            if done {
+                break;
+            }
+        }
+
         self.wait_for_exit_signal();
         self.report_status();
     }

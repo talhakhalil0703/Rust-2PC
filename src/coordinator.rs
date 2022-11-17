@@ -8,11 +8,13 @@ extern crate rand;
 extern crate ipc_channel;
 
 use std::collections::HashMap;
+use std::process::Child;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
+use std::vec;
 
 use coordinator::ipc_channel::ipc::IpcSender as Sender;
 use coordinator::ipc_channel::ipc::IpcReceiver as Receiver;
@@ -24,6 +26,8 @@ use message::MessageType;
 use message::ProtocolMessage;
 use message::RequestStatus;
 use oplog;
+
+use crate::participant;
 
 /// CoordinatorState
 /// States for 2PC state machine
@@ -37,6 +41,14 @@ pub enum CoordinatorState {
     SentGlobalDecision
 }
 
+#[derive(Debug)]
+pub struct ChildData {
+    pub child: Child,
+    pub send_to_child: Sender<ProtocolMessage>,
+    pub receive_from_child: Receiver<ProtocolMessage>
+}
+
+
 /// Coordinator
 /// Struct maintaining state for coordinator
 #[derive(Debug)]
@@ -44,6 +56,10 @@ pub struct Coordinator {
     state: CoordinatorState,
     running: Arc<AtomicBool>,
     log: oplog::OpLog,
+    clients: Vec<ChildData>,
+    participants: Vec<ChildData>,
+    receive_channel: Receiver<ProtocolMessage>,
+    messages_per_client : u32
 }
 
 ///
@@ -68,12 +84,18 @@ impl Coordinator {
     ///
     pub fn new(
         log_path: String,
-        r: &Arc<AtomicBool>) -> Coordinator {
+        r: &Arc<AtomicBool>,
+        recv: Receiver<ProtocolMessage>,
+    msg_per_client: u32) -> Coordinator {
 
         Coordinator {
             state: CoordinatorState::Quiescent,
             log: oplog::OpLog::new(log_path),
             running: r.clone(),
+            clients: vec![],
+            participants: vec![],
+            receive_channel: recv,
+            messages_per_client : msg_per_client
             // TODO
         }
     }
@@ -85,10 +107,9 @@ impl Coordinator {
     /// HINT: Keep track of any channels involved!
     /// HINT: You may need to change the signature of this function
     ///
-    pub fn participant_join(&mut self, name: &String) {
+    pub fn participant_join(&mut self,  participant: ChildData) {
         assert!(self.state == CoordinatorState::Quiescent);
-
-        // TODO
+        self.clients.push(participant);
     }
 
     ///
@@ -98,10 +119,9 @@ impl Coordinator {
     /// HINT: Keep track of any channels involved!
     /// HINT: You may need to change the signature of this function
     ///
-    pub fn client_join(&mut self, name: &String) {
+    pub fn client_join(&mut self, client: ChildData) {
         assert!(self.state == CoordinatorState::Quiescent);
-
-        // TODO
+        self.clients.push(client);
     }
 
     ///
@@ -127,6 +147,20 @@ impl Coordinator {
     pub fn protocol(&mut self) {
 
         // TODO
+        // Wait for a message from clients, should wait client amount times.
+        let processed = 0;
+        for messages in 0..(self.messages_per_client * self.clients.len() as u32){
+            //Wait and issue P participant messages
+            for participant in self.participants {
+                // Get Client messages
+                for client in self.clients{
+                    let message_received = self.receive_channel.recv().unwrap();
+                    if message_received.mtype == MessageType::ClientRequest {
+                        participant.
+                    }
+                }
+            }
+        }
 
         self.report_status();
     }
