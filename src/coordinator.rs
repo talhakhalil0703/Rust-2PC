@@ -157,24 +157,43 @@ impl Coordinator {
 
         // TODO
         // Wait for a message from clients, should wait client amount times.
-        let processed = 0;
-        for messages in 0..(self.messages_per_client * self.clients.len() as u32){
+        let mut quit_early = false;
+        for _ in 0..(self.messages_per_client * self.clients.len() as u32){
+            if  !self.running.load(Ordering::SeqCst) {
+                quit_early = true;
+                break;
+            }
+
             //Receive MessageType::ClientRequest from a client
             let client_request_msg = self.receive_channel_client.recv().unwrap();
             //Clone the message and prepare to send it to participants
             // TODO check if clonning everything here is fine, I think it should be only txid cloned and oid cloned
             let mut proposal_msg = ProtocolMessage::instantiate(MessageType::CoordinatorPropose, client_request_msg.uid.clone(),client_request_msg.txid.clone(), client_request_msg.senderid.clone(), client_request_msg.opid.clone());
 
+            if  !self.running.load(Ordering::SeqCst) {
+                quit_early = true;
+                break;
+            }
+
             //Wait and issue P participant messages
             for participant in &self.participants {
                 participant.send_to_child.send(proposal_msg.clone());
             }
 
+            if  !self.running.load(Ordering::SeqCst) {
+                quit_early = true;
+                break;
+            }
+
             // Now keep track of return messages from all participants, there should be P returns
-            // TODO implement a timeout for if the message could not be sent
-            // TODO this currently assumes every participant returns a yes
             let mut count_returned = 0;
             thread::sleep(Duration::from_millis(100));
+
+            if  !self.running.load(Ordering::SeqCst) {
+                quit_early = true;
+                break;
+            }
+
             for _ in &self.participants {
                 while let Ok(participant_vote_msg) = self.receive_channel_participant.try_recv(){
                     if participant_vote_msg.mtype == MessageType::ParticipantVoteCommit{
@@ -185,6 +204,11 @@ impl Coordinator {
                         debug!("Expected Participant Abort or Commit");
                     }
                 }
+            }
+
+            if  !self.running.load(Ordering::SeqCst) {
+                quit_early = true;
+                break;
             }
 
             let mut coordinator_vote = MessageType::CoordinatorCommit;
@@ -202,6 +226,11 @@ impl Coordinator {
                 participant.send_to_child.send(proposal_msg.clone());
             }
 
+            if  !self.running.load(Ordering::SeqCst) {
+                quit_early = true;
+                break;
+            }
+
             //Send message back to the specific client.. that participant either task failed or passed
             proposal_msg.mtype = MessageType::ClientResultCommit;
             if coordinator_vote == MessageType::CoordinatorAbort {
@@ -215,6 +244,11 @@ impl Coordinator {
                     break;
                 }
             }
+
+            if !self.running.load(Ordering::SeqCst) {
+                quit_early = true;
+                break;
+            }
         }
 
         let exit_message = ProtocolMessage::generate(MessageType::CoordinatorExit, format!("Exit"), format!("Exit"), 0);
@@ -226,8 +260,10 @@ impl Coordinator {
             participant.send_to_child.send(exit_message.clone());
         }
 
-        while self.running.load(Ordering::SeqCst) {
-            thread::sleep(Duration::from_millis(1));
+        if ! quit_early {
+            while self.running.load(Ordering::SeqCst) {
+                thread::sleep(Duration::from_millis(1));
+            }
         }
 
         self.report_status();
