@@ -11,6 +11,8 @@ use std::sync::Mutex;
 
 use message;
 
+use crate::message::ProtocolMessage;
+
 #[derive(Debug)]
 pub struct OpLog {
     seqno: u32,
@@ -84,6 +86,10 @@ impl OpLog {
         writeln!(&mut self.lf).unwrap();
         self.lf.flush().unwrap();
         log.insert(id, pm);
+    }
+
+    pub fn append_from_pm (&mut self, msg: ProtocolMessage){
+        self.append(msg.mtype, msg.txid, msg.senderid,msg.opid);
     }
 
     ///

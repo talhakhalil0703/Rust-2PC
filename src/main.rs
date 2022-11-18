@@ -25,6 +25,9 @@ pub mod checker;
 pub mod tpcoptions;
 use message::ProtocolMessage;
 use participant::Participant;
+use std::time::Duration;
+use std::thread;
+
 
 ///
 /// pub fn spawn_child_and_connect(child_opts: &mut tpcoptions::TPCOptions) -> (std::process::Child, Sender<ProtocolMessage>, Receiver<ProtocolMessage>)
@@ -38,7 +41,7 @@ use participant::Participant;
 ///
 /// HINT: You can change the signature of the function if necessary
 ///
-fn spawn_child_and_connect(child_opts: &mut tpcoptions::TPCOptions, tx: Sender<ProtocolMessage>) -> (Child, Sender<ProtocolMessage>, Receiver<ProtocolMessage>) {
+fn spawn_child_and_connect(child_opts: &mut tpcoptions::TPCOptions, tx: Sender<ProtocolMessage>) -> (Child, Sender<ProtocolMessage>) {
     // This function must be used in conjunction with connect_to_coordinator, you're given the options of the child node which
     // includes the ipc name for which you need to connect to. This function is being called by the coordinator
 
@@ -59,7 +62,7 @@ fn spawn_child_and_connect(child_opts: &mut tpcoptions::TPCOptions, tx: Sender<P
     let child_transmitter: Sender<Sender<ProtocolMessage>> = Sender::connect(child_server_name.to_string()).unwrap(); // Connecting to server
     child_transmitter.send(tx).unwrap();
 
-    (child, send_message_to_child, rx)
+    (child, send_message_to_child)
 }
 
 ///
@@ -109,35 +112,45 @@ fn run(opts: & tpcoptions::TPCOptions, running: Arc<AtomicBool>) {
     let coord_log_path = format!("{}//{}", opts.log_path, "coordinator.log");
 
     //Parents communication channels
-    let (tx, rx) = channel().unwrap();
+    let (tx_participant, rx_participant) = channel().unwrap();
+    let (tx_client, rx_client) = channel().unwrap();
 
-    let mut coordinator = Coordinator::new(coord_log_path, &running, rx, opts.num_requests);
+    let mut coordinator = Coordinator::new(coord_log_path, &running, rx_participant,rx_client, opts.num_requests);
 
     // 2. Spawns and connects to new clients processes and then registers them with
     //    the coordinator
     for n in 0..opts.num_clients{
         // The name of the client can be its server name
+        debug!("{}", format!("Spawning Child Client {}", n));
         let mut options = opts.clone();
+        options.mode = format!("client");
         options.num = n;
-        let (ch, trans, recv) = spawn_child_and_connect( &mut options, tx.clone());
-        coordinator.client_join(ChildData{child:ch, send_to_child:trans, receive_from_child:recv});
+        let (ch, trans) = spawn_child_and_connect( &mut options, tx_client.clone());
+        coordinator.client_join(ChildData{id: format!("client_{}", n), child:ch, send_to_child:trans});
     }
 
     // 3. Spawns and connects to new participant processes and then registers them
     //    with the coordinator
     for n in 0..opts.num_participants{
         // The name of the client can be its server name
+        debug!("{}", format!("Spawning Child Participant {}", n));
+
         let mut options = opts.clone();
         options.num = n;
-        let (ch, trans, recv) = spawn_child_and_connect( &mut options, tx.clone());
-        coordinator.participant_join(ChildData{child:ch, send_to_child:trans, receive_from_child:recv});
+        options.mode = format!("participant");
+        let (ch, trans) = spawn_child_and_connect( &mut options, tx_participant.clone());
+        coordinator.participant_join(ChildData{id: format!("participant_{}", n),child:ch, send_to_child:trans});
     }
 
-
+    debug!("Spawned all Children Nodes");
     // 4. Starts the coordinator protocol
     coordinator.protocol();
 
     // 5. Wait until the children finish execution
+    trace!("Waiting for exit signal Coordinator");
+
+
+
     // TODO
 }
 
@@ -180,6 +193,8 @@ fn run_participant(opts: & tpcoptions::TPCOptions, running: Arc<AtomicBool>) {
 }
 
 fn main() {
+    env::set_var("RUST_BACKTRACE", "1");
+
     // Parse CLI arguments
     let opts = tpcoptions::TPCOptions::new();
     // Set-up logging and create OpLog path if necessary

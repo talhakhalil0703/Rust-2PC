@@ -117,7 +117,7 @@ impl Participant {
             info!("{}::Sending success operation #{}", pm.txid.clone(), pm.opid.clone());
 
             // Here we go send the protocol message from a client
-            let _ = self.send.send(pm);
+            let _ = self.send.send(pm.clone());
 
             trace!("{}::Sent success operation #{}", pm.txid.clone(), pm.opid.clone());
 
@@ -144,15 +144,16 @@ impl Participant {
 
         trace!("{}::Performing operation", self.id_str.clone());
         let x: f64 = random();
-        let message_type = MessageType::ParticipantVoteCommit;
+        let mut message_type = MessageType::ParticipantVoteCommit;
 
+        trace!("X prob {}", x);
         if x > self.operation_success_prob {
             message_type = MessageType::ParticipantVoteAbort;
         }
 
-        let txid = format!("{}_op_{}", self.id_str.clone(), self.count);
-        let return_message = ProtocolMessage::generate(message_type, txid, self.id_str.clone(), self.count);
-        self.send(return_message);
+        let return_message = ProtocolMessage::generate(message_type, request_option.txid, self.id_str.clone(), request_option.opid);
+        self.send(return_message.clone());
+        self.log.append_from_pm(return_message.clone());
 
         true
     }
@@ -188,6 +189,7 @@ impl Participant {
 
     fn wait_for_coordinator_decision(&mut self) -> bool{
         let coord_final_message = self.recv.recv().unwrap();
+        self.log.append_from_pm(coord_final_message.clone());
         if coord_final_message.mtype == MessageType::CoordinatorCommit{
             self.success_operations += 1;
         } else if coord_final_message.mtype == MessageType::CoordinatorAbort {
@@ -210,7 +212,7 @@ impl Participant {
         trace!("{}::Beginning protocol", self.id_str.clone());
 
         // TODO
-        let done = false;
+        let mut done = false;
 
         while !done{
             // Receive message to start processing message CoordinatorPropose recieve
